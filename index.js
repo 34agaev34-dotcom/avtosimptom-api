@@ -251,7 +251,12 @@
       <div class="paywall" id="paywall">
         <h3>Открыть полный разбор</h3>
         <p>Сейчас видно только сами причины. Полный разбор — почему это, как проверить, насколько срочно и сколько примерно стоит починка.</p>
+        <div class="field" style="max-width:320px;margin:0 auto 12px;text-align:left">
+          <label for="email">Email для чека</label>
+          <input id="email" type="email" inputmode="email" placeholder="you@mail.ru" autocomplete="email">
+        </div>
         <button class="btn pay" id="pay">Открыть за <span class="price">49&nbsp;₽</span></button>
+        <div class="err" id="payErr" style="max-width:320px;margin:12px auto 0"></div>
       </div>
 
       <div class="disclaimer" id="disclaimer"></div>
@@ -264,18 +269,16 @@
       Самозанятый Агаев Теймур Азизович · ИНН 690707062421<br>
       Приём оплаты через ЮKassa · Чек регистрируется в сервисе «Мой налог»
     </div>
-    <div style="margin-top:12px">
-      <a href="/oferta.html" style="color:var(--muted);text-decoration:underline">Публичная оферта</a>
-    </div>
   </footer>
 
 <script>
-  // ── Адрес твоего воркера ──
-  const WORKER_URL = "https://avtosimptom.34agaev34.workers.dev/";
+  // ── Адрес нового бэкенда (Timeweb) ──
+  const API = "https://34agaev34-dotcom-avtosimptom-api-b14c.twc1.net";
 
   const $ = id => document.getElementById(id);
   const go = $("go"), scan = $("scan"), results = $("results"), err = $("err");
-  let lastData = null;   // сюда кладём ответ, чтобы «разблокировать» после оплаты
+  let teaser = null;    // бесплатный разбор (только названия причин)
+  let draftId = null;   // id черновика на сервере
   let paid = false;
 
   const statuses = ["Считываю симптом…","Сверяю с базой неисправностей…","Готовлю разбор…"];
@@ -285,6 +288,7 @@
     if ((e.ctrlKey||e.metaKey) && e.key === "Enter") diagnose();
   });
 
+  // ── 1. Бесплатный разбор (тизер) ──
   async function diagnose(){
     const symptom = $("symptom").value.trim();
     const car = $("car").value.trim();
@@ -301,7 +305,7 @@
     const rot = setInterval(()=>{ si=(si+1)%statuses.length; $("scanStatus").textContent = statuses[si]; }, 1100);
 
     try{
-      const r = await fetch(WORKER_URL, {
+      const r = await fetch(API + "/diagnose", {
         method:"POST",
         headers:{"Content-Type":"application/json"},
         body:JSON.stringify({ symptom, car })
@@ -313,7 +317,7 @@
         showError(data.error || "Не получилось получить разбор. Попробуй ещё раз через минуту.");
         return;
       }
-      lastData = data; paid = false;
+      teaser = data; draftId = data.draftId; paid = false;
       render(data);
     }catch(e){
       clearInterval(rot); scan.classList.remove("on");
@@ -323,9 +327,7 @@
     }
   }
 
-  function showError(msg){
-    err.textContent = msg; err.classList.add("on");
-  }
+  function showError(msg){ err.textContent = msg; err.classList.add("on"); }
 
   // ургентность → класс индикатора
   function urgencyClass(u=""){
@@ -341,9 +343,17 @@
     return 1;
   }
 
+  // заглушка «под замком» — размытые строки, чтобы было видно, что за blur что-то есть
+  const LOCK_FILLER = `
+    <div class="detail">
+      <p><b>Почему</b>—————————————————— —————— ———————————— ——————.</p>
+      <p><b>Как проверить</b>———————— —————————————— ————.</p>
+      <span class="tag amber">————————</span>
+    </div>`;
+
   function render(d){
     $("summary").textContent = d.summary || "";
-    $("disclaimer").textContent = d.disclaimer || "";
+    $("disclaimer").textContent = d.disclaimer || "Предварительная оценка, не заменяет очную диагностику.";
 
     const box = $("causes"); box.innerHTML = "";
     (d.causes || []).forEach(c => {
@@ -351,6 +361,15 @@
       const fill = likelihoodFill(c.likelihood);
       const el = document.createElement("div");
       el.className = "cause" + (paid ? "" : " locked");
+
+      const detail = paid ? `
+        <div class="detail">
+          ${c.explanation?`<p><b>Почему</b>${esc(c.explanation)}</p>`:""}
+          ${c.check?`<p><b>Как проверить</b>${esc(c.check)}</p>`:""}
+          ${c.urgency?`<span class="tag ${uc}">${esc(c.urgency)}</span>`:""}
+          ${c.cost_hint?`<span class="tag amber" style="margin-left:6px">Затраты: ${esc(c.cost_hint)}</span>`:""}
+        </div>` : LOCK_FILLER;
+
       el.innerHTML = `
         <div class="cause-head">
           <span class="lamp ${uc}"></span>
@@ -364,19 +383,14 @@
             <i class="${fill>=3?'fill':''}"></i>
           </span>
         </div>
-        <div class="detail">
-          ${c.explanation?`<p><b>Почему</b>${esc(c.explanation)}</p>`:""}
-          ${c.check?`<p><b>Как проверить</b>${esc(c.check)}</p>`:""}
-          ${c.urgency?`<span class="tag ${uc}">${esc(c.urgency)}</span>`:""}
-          ${c.cost_hint?`<span class="tag amber" style="margin-left:6px">Затраты: ${esc(c.cost_hint)}</span>`:""}
-        </div>`;
+        ${detail}`;
       box.appendChild(el);
     });
 
-    // блок «первый шаг» — часть полного разбора
-    if (d.first_step){
+    // блок «с чего начать» — только в платном разборе
+    if (paid && d.first_step){
       const fs = document.createElement("div");
-      fs.className = "cause" + (paid ? "" : " locked");
+      fs.className = "cause";
       fs.innerHTML = `<div class="cause-head"><span class="lamp amber"></span>
         <span class="cause-title">С чего начать</span></div>
         <div class="detail"><p>${esc(d.first_step)}</p></div>`;
@@ -388,14 +402,83 @@
     results.scrollIntoView({behavior:"smooth", block:"start"});
   }
 
-  // ── ЗАГЛУШКА ОПЛАТЫ ──
-  // Пока просто открывает разбор. Сюда встанет ЮKassa (следующий шаг).
-  $("pay").addEventListener("click", ()=>{
-    paid = true;
-    render(lastData);
+  // ── 2. Оплата: создаём платёж и уходим на страницу ЮKassa ──
+  $("pay").addEventListener("click", async ()=>{
+    const payErr = $("payErr");
+    payErr.classList.remove("on");
+    const email = $("email").value.trim();
+    if (!email || !email.includes("@")){
+      payErr.textContent = "Укажи email — на него придёт чек об оплате.";
+      payErr.classList.add("on");
+      return;
+    }
+    const symptom = $("symptom").value.trim();
+    const car = $("car").value.trim();
+
+    const payBtn = $("pay");
+    payBtn.disabled = true; payBtn.textContent = "Перехожу к оплате…";
+
+    try{
+      const r = await fetch(API + "/create-payment", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({ draftId, symptom, car, email })
+      });
+      const data = await r.json();
+      if (!r.ok || !data.confirmationUrl){
+        payErr.textContent = data.error || "Не удалось создать платёж. Попробуй ещё раз.";
+        payErr.classList.add("on");
+        payBtn.disabled = false; payBtn.innerHTML = 'Открыть за <span class="price">49&nbsp;₽</span>';
+        return;
+      }
+      // запоминаем платёж, чтобы после возврата проверить оплату
+      localStorage.setItem("as_paymentId", data.paymentId);
+      window.location.href = data.confirmationUrl; // уходим на страницу оплаты ЮKassa
+    }catch(e){
+      payErr.textContent = "Нет связи. Проверь интернет и попробуй снова.";
+      payErr.classList.add("on");
+      payBtn.disabled = false; payBtn.innerHTML = 'Открыть за <span class="price">49&nbsp;₽</span>';
+    }
   });
 
+  // ── 3. Возврат с оплаты: проверяем статус и открываем полный разбор ──
+  async function checkPaymentOnReturn(){
+    const params = new URLSearchParams(location.search);
+    const pid = localStorage.getItem("as_paymentId");
+    if (!params.has("paid") || !pid) return;
+
+    // показываем загрузку
+    results.classList.remove("on");
+    scan.classList.add("on");
+    $("scanStatus").textContent = "Проверяю оплату…";
+
+    let data = null;
+    // платёж может «дозревать» пару секунд — опросим несколько раз
+    for (let i = 0; i < 6; i++){
+      try{
+        const r = await fetch(API + "/result?paymentId=" + encodeURIComponent(pid));
+        data = await r.json();
+        if (data.paid) break;
+      }catch(e){}
+      await new Promise(res => setTimeout(res, 2000));
+    }
+
+    scan.classList.remove("on");
+
+    if (data && data.paid){
+      localStorage.removeItem("as_paymentId");
+      history.replaceState({}, "", location.pathname); // убираем ?paid=1 из адреса
+      paid = true;
+      render(data);
+    }else{
+      showError("Оплата пока не подтвердилась. Если деньги списались — обнови страницу через минуту.");
+    }
+  }
+
   function esc(s){ return String(s).replace(/[&<>]/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[m])); }
+
+  // запускаем проверку при загрузке страницы (после возврата с ЮKassa)
+  checkPaymentOnReturn();
 </script>
 </body>
 </html>
